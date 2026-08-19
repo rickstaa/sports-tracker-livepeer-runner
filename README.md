@@ -97,6 +97,21 @@ docker compose up -d --build
 uv run client.py --mode teams clip.mp4
 ```
 
+**Need a clip?** Any football footage works. This one is free for commercial use, needs no account, and is what the numbers below were measured on:
+
+```sh
+curl -L -o match.mp4 https://www.pexels.com/download/video/9960141/
+uv run client.py --mode teams match.mp4 --max-frames 200
+```
+
+It arrives as 2560x1440, 40s, 68 MB. `--max-frames` keeps a first run short; for repeated runs it is worth scaling once:
+
+```sh
+ffmpeg -i match.mp4 -t 12 -vf scale=1280:-2 -c:v libx264 -crf 20 -an clip.mp4
+```
+
+Aim for a **sideline or broadcast angle**. Aerial and drone shots put players at ten pixels tall, below what the detector resolves, and close-ups only ever have two players in frame.
+
 The client reads a file or stdin and writes MPEG-TS, so it chains:
 
 ```sh
