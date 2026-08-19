@@ -1,0 +1,64 @@
+# End-to-end offchain demo: orchestrator + the sports tracker app. Free, no wallet.
+#
+#   docker compose up -d --build
+#   uv run client.py --mode teams clip.mp4
+#
+# The app registers DYNAMICALLY: it announces itself to the orchestrator with the
+# SDK (runner.py) rather than being named in the orchestrator's config, which is
+# what a stateful live app wants — the tracker and its trickle channels live for
+# the length of a session. Requires an NVIDIA GPU.
+#
+# Self-contained on purpose: nothing here is pulled in from a parent directory,
+# so this works wherever you copy it.
+
+services:
+  orchestrator:
+    image: livepeer/go-livepeer:v0.9.1
+    container_name: sports_tracker_orchestrator
+    # Two distinct addresses:
+    #   serviceAddr    advertised to external clients in discovery responses,
+    #                  so it must be reachable from the host (published port).
+    #   liveRunnerAddr control-plane URL runners use for heartbeat + trickle,
+    #                  so it must resolve on the compose network.
+    command:
+      - -orchestrator
+      - -useLiveRunners
+      - -serviceAddr=127.0.0.1:8935
+      - -httpAddr=0.0.0.0:8935
+      - -liveRunnerAddr=https://orchestrator:8935
+      - -orchSecret=abcdef
+      - -network=offchain
+      - -monitor=false
+      - -v=6
+    ports:
+      - "8935:8935"
+    # 8935 is HTTPS and the image has only openssl, no curl or wget. A raw TCP
+    # probe would open the socket without a handshake and log a TLS error every
+    # interval, so speak real TLS; matching "200 OK" also proves it is serving.
+    healthcheck:
+      test: printf 'GET /healthz HTTP/1.0\r\n\r\n' | openssl s_client -connect 127.0.0.1:8935 -quiet 2>/dev/null | grep -q '200 OK'
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 5s
+
+  app:
+    # `up` always builds; `--pull always` runs the published image instead.
+    image: ghcr.io/rickstaa/sports-tracker-livepeer-runner:latest
+    pull_policy: build
+    build: .
+    container_name: sports_tracker_app
+    # RF-DETR is a transformer: a GPU is the point. Weights are baked into the
+    # image, so nothing is downloaded at runtime.
+    gpus: all
+    # Wait for the orchestrator's healthcheck so registration does not race its boot.
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    command:
+      - python
+      - runner.py
+      - --host=0.0.0.0
+      - --orchestrator=https://orchestrator:8935
+      - --orchSecret=abcdef
+      - --runner-url=http://app:8989

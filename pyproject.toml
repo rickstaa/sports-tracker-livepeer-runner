@@ -1,0 +1,12 @@
+[project]
+name = "sports-tracker-livepeer-runner"
+version = "0.1.0"
+description = "Realtime player and ball tracking on the Livepeer network"
+requires-python = ">=3.12"
+dependencies = [
+    "av",                       # client: decode/encode the clip it streams
+    "livepeer-gateway>=1.0.0",
+]
+
+[tool.ruff]
+target-version = "py312"
