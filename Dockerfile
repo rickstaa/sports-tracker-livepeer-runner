@@ -19,7 +19,7 @@ RUN python -m pip install --no-cache-dir \
 
 # rfdetr: Apache-2.0 detector. supervision: MIT tracking and annotators.
 RUN python -m pip install --no-cache-dir \
-        rfdetr supervision av opencv-python-headless numpy aiohttp \
+        rfdetr supervision trackers av opencv-python-headless numpy aiohttp \
         "livepeer-gateway>=1.0.0"
 
 # Bake the weights in so the container runs offline and the first session does

@@ -44,6 +44,8 @@ log = logging.getLogger("sports-tracker")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8989
 DEFAULT_APP = "rickstaa/sports-tracker"
+TRACKERS = ("BoTSORT", "ByteTrack", "OCSORT", "SORT")
+_tracker_name = "BoTSORT"
 DEFAULT_SIZE = "medium"
 MODES = frozenset({"track", "teams"})
 SIZES = ("nano", "small", "medium", "large")
@@ -59,18 +61,33 @@ _label = None
 _triangle = None  # ball marker
 
 
-def _load(size: str, weights: str | None) -> None:
+def _load(
+    size: str, weights: str | None, precision: str = "fp16", compile: bool = False
+) -> None:
     global _model, _sv, _ellipse, _ellipse_teams, _label, _triangle
     global _person_class, _ball_class
     if _model is not None:
         return
+    import numpy as np
     import rfdetr
     import supervision as sv
+    import torch
     from rfdetr.assets.coco_classes import COCO_CLASSES
 
     # RFDETRNano / RFDETRSmall / RFDETRMedium / RFDETRLarge, all Apache-2.0.
     cls = getattr(rfdetr, f"RFDETR{size.capitalize()}")
     _model = cls(pretrain_weights=weights) if weights else cls()
+
+    # fp16 is most of the speedup and costs nothing on a Tensor Core GPU, so it is
+    # the default. torch.compile is opt-in: it adds a warmup of tens of seconds and
+    # is the piece that fails on an unusual driver/triton combination.
+    dtype = torch.float16 if precision == "fp16" else torch.float32
+    _model.inference(compile=compile, batch_size=1, dtype=dtype, inplace=True)
+
+    # torch.compile is lazy, so force the warmup HERE, before register_runner
+    # announces the app ready. Otherwise the first paying session buys the compile.
+    _model.predict(np.zeros((720, 1280, 3), dtype=np.uint8), threshold=0.5)
+    log.info("warmed up: precision=%s compile=%s", precision, compile)
     # Resolve by name: COCO checkpoints and fine-tuned ones index differently.
     by_name = {v: k for k, v in COCO_CLASSES.items()}
     _person_class = by_name.get("person", 0)
@@ -83,6 +100,20 @@ def _load(size: str, weights: str | None) -> None:
     _label = sv.LabelAnnotator(text_scale=0.5)
     _triangle = sv.TriangleAnnotator()
     log.info("loaded RF-DETR %s + supervision", size)
+
+
+def _new_tracker():
+    """A tracker from roboflow/trackers (Apache-2.0).
+
+    supervision's own ByteTrack is deprecated and removed in v0.31. BoT-SORT is
+    the better default here anyway: it compensates for camera motion, and
+    broadcast sports footage pans constantly, which is exactly when plain
+    ByteTrack starts dropping ids.
+    """
+    import trackers
+
+    cls = getattr(trackers, f"{_tracker_name}Tracker")
+    return cls()
 
 
 def _team_ids(img: np.ndarray, xyxy: np.ndarray) -> np.ndarray:
@@ -146,7 +177,12 @@ def _annotate(img: np.ndarray, session: TrackSession) -> np.ndarray:
     det = _model.predict(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), threshold=0.5)
     players = det[det.class_id == _person_class]
     ball = det[det.class_id == _ball_class]
-    players = session.tracker.update_with_detections(players)
+    # The frame is needed for camera-motion compensation, not just the boxes.
+    players = session.tracker.update(players, img)
+    # A tracker returns unconfirmed tracks as id -1; they become real after a few
+    # frames. Drawing them labels half the pitch "#-1".
+    if players.tracker_id is not None and len(players):
+        players = players[players.tracker_id != -1]
 
     out = img.copy()
     if len(players):
@@ -194,6 +230,23 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULT_SIZE,
         choices=SIZES,
         help="RF-DETR variant. Bigger is more accurate and slower.",
+    )
+    parser.add_argument(
+        "--tracker",
+        default="BoTSORT",
+        choices=TRACKERS,
+        help="Tracking algorithm. BoT-SORT compensates for camera motion.",
+    )
+    parser.add_argument(
+        "--precision",
+        default="fp16",
+        choices=("fp16", "fp32"),
+        help="fp16 is several times faster on Tensor Cores; fp32 to debug.",
+    )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="torch.compile the model. Faster, but adds a startup warmup.",
     )
     parser.add_argument(
         "--weights",
@@ -251,7 +304,7 @@ async def _handle_track(request: web.Request) -> web.Response:
         mode=mode,
         output=None,  # set below
         publisher=publisher,
-        tracker=_sv.ByteTrack(),
+        tracker=_new_tracker(),
         trace=_sv.TraceAnnotator(),
     )
 
@@ -285,7 +338,10 @@ def main() -> None:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
     args = _parse_args()
-    _load(args.size, args.weights)  # fail fast if the weights/deps are missing
+    global _tracker_name
+    _tracker_name = args.tracker
+    # Loads, optimizes and warms up before the app registers as ready.
+    _load(args.size, args.weights, args.precision, args.compile)
 
     async def _on_startup(app: web.Application) -> None:
         app["registration"] = await register_runner(  # Livepeer: 1

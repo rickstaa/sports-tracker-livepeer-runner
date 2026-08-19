@@ -26,10 +26,10 @@ The app is **dynamically registered**: [runner.py](runner.py) announces itself t
 
 It exposes two ordinary HTTP handlers, both reverse-proxied through the orchestrator:
 
-| Endpoint      | Does                                                            |
-| ------------- | --------------------------------------------------------------- |
-| `POST /track` | start a session and open the trickle `in` / `out` channels       |
-| `POST /update`| switch mode mid-stream, without dropping the session             |
+| Endpoint       | Does                                                       |
+| -------------- | ---------------------------------------------------------- |
+| `POST /track`  | start a session and open the trickle `in` / `out` channels |
+| `POST /update` | switch mode mid-stream, without dropping the session       |
 
 Grep `# Livepeer:` in either file for the calls. In [runner.py](runner.py):
 
@@ -73,6 +73,15 @@ sequenceDiagram
 | `large`  | 56.5    | 6.8 ms       |
 
 `medium` is the default and the weights are baked into the image, so nothing downloads at runtime. The COCO classes used are **person** and **sports ball**, resolved by name rather than index so a fine-tuned checkpoint passed with `--weights` keeps working.
+
+Tracking is [`trackers`](https://github.com/roboflow/trackers) (Apache-2.0), not `supervision`'s own ByteTrack, which is deprecated and removed in v0.31. `--tracker` picks the algorithm; **BoT-SORT** is the default because it compensates for camera motion, and broadcast sports footage pans constantly, which is exactly when plain ByteTrack starts dropping ids. `ByteTrack`, `OCSORT` and `SORT` are also available.
+
+Two speed knobs:
+
+- `--precision` defaults to **fp16**, which is most of the speedup on a Tensor Core GPU and costs nothing. `fp32` is there for debugging.
+- `--compile` runs `torch.compile` on the model. Faster again, but it adds a startup warmup of tens of seconds and is the piece most likely to fail on an unusual driver or triton build, so it is opt-in.
+
+Both are applied at load and **warmed up before the app registers as ready**, so a paying session never buys the compile.
 
 Two modes, switchable mid-stream with `POST /update`:
 
@@ -141,12 +150,12 @@ This repo is an **example** of how to run realtime video tracking on the [live r
 
 The image is **permissively licensed end to end**, which was a deliberate choice:
 
-| Component            | Licence    |
-| -------------------- | ---------- |
-| RF-DETR (detector)   | Apache-2.0 |
-| `supervision`        | MIT        |
-| PyTorch              | BSD-3      |
-| this wrapper         | MIT        |
+| Component          | Licence    |
+| ------------------ | ---------- |
+| RF-DETR (detector) | Apache-2.0 |
+| `supervision`      | MIT        |
+| PyTorch            | BSD-3      |
+| this wrapper       | MIT        |
 
 The obvious alternative, Ultralytics YOLO, is **AGPL-3.0**. AGPL §13 covers network interaction, and a Livepeer runner is network-interaction software by definition, so an orchestrator running such an image commercially would inherit a source-disclosure obligation. RF-DETR avoids that and is also the stronger model: RF-DETR Large reaches 56.5 COCO AP at 6.8 ms, against YOLOv11x at 50.9 AP and higher latency.
 
